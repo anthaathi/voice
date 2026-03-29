@@ -210,29 +210,17 @@ async def _transcribe_and_send(ws: WebSocket, pcm_bytes: bytes, item_id: str):
         })
 
 
-# --- WebSocket VAD helpers ---
+
+
+# ---------------------------------------------------------------------------
+# Audio pipeline: noise suppression, VAD, endpoint detection, transcription
+# ---------------------------------------------------------------------------
 
 SAMPLE_RATE = 24000
 BYTES_PER_SAMPLE = 2
 SAMPLES_PER_MS = SAMPLE_RATE // 1000
-
-
-def _resample_24k_to_16k(samples_24k: np.ndarray) -> np.ndarray:
-    n_out = int(len(samples_24k) * 16000 / 24000)
-    indices = (np.arange(n_out) * 24000 / 16000).astype(np.int64)
-    return samples_24k[np.clip(indices, 0, len(samples_24k) - 1)]
-
-
-def _check_speech(vad: webrtcvad.Vad, chunk_24k_int16: np.ndarray) -> bool:
-    resampled = _resample_24k_to_16k(chunk_24k_int16)
-    frame_size = 480
-    speech_frames = 0
-    total_frames = 0
-    for i in range(0, len(resampled) - frame_size + 1, frame_size):
-        if vad.is_speech(resampled[i:i + frame_size].tobytes(), 16000):
-            speech_frames += 1
-        total_frames += 1
-    return total_frames > 0 and speech_frames > total_frames * 0.3
+VAD_FRAME_MS = 30
+VAD_FRAME_SAMPLES_16K = int(16000 * VAD_FRAME_MS / 1000)
 
 
 def _make_eid():
@@ -241,6 +229,203 @@ def _make_eid():
 
 def _make_iid():
     return f"item_{uuid.uuid4().hex[:24]}"
+
+
+def _resample_24k_to_16k(samples: np.ndarray) -> np.ndarray:
+    n_out = int(len(samples) * 16000 / 24000)
+    indices = (np.arange(n_out) * 24000 / 16000).astype(np.int64)
+    return samples[np.clip(indices, 0, len(samples) - 1)]
+
+
+def _vad_frames(vad: webrtcvad.Vad, chunk_24k: np.ndarray) -> list[bool]:
+    resampled = _resample_24k_to_16k(chunk_24k)
+    results = []
+    fs = VAD_FRAME_SAMPLES_16K
+    for i in range(0, len(resampled) - fs + 1, fs):
+        frame = resampled[i:i + fs].tobytes()
+        results.append(vad.is_speech(frame, 16000))
+    return results
+
+
+def _denoise_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
+    with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as inf:
+        inf.write(pcm_bytes)
+        inf.flush()
+        outp = inf.name + ".clean.pcm"
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "s16le", "-ar", str(sample_rate), "-ac", "1", "-i", inf.name,
+                    "-af", "highpass=f=200,lowpass=f=3000,afftdn=nt=w:om=o:nr=20",
+                    "-f", "s16le", "-ar", str(sample_rate), "-ac", "1", outp,
+                ],
+                capture_output=True, timeout=15,
+            )
+            if result.returncode == 0 and os.path.exists(outp):
+                with open(outp, "rb") as f:
+                    return f.read()
+        except Exception as e:
+            log.warning(f"Denoise failed: {e}")
+        finally:
+            os.unlink(inf.name)
+            if os.path.exists(outp):
+                os.unlink(outp)
+    return pcm_bytes
+
+
+class AudioPipelineConfig:
+    frame_ms: int = 30
+    speech_start_frames: int = 3
+    speech_stop_silence_ms: int = 800
+    min_utterance_ms: int = 300
+    max_utterance_ms: int = 12000
+    preroll_ms: int = 200
+    ring_buffer_size: int = 8
+    ring_buffer_threshold: int = 5
+    vad_aggressiveness: int = 2
+    denoise: bool = True
+
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            if hasattr(self, k):
+                setattr(self, k, v)
+
+
+class _State:
+    IDLE = "idle"
+    SPEAKING = "speaking"
+    SILENCE_PENDING = "silence_pending"
+
+
+class AudioPipeline:
+    def __init__(self, cfg: AudioPipelineConfig | None = None):
+        self.cfg = cfg or AudioPipelineConfig()
+        self.vad = webrtcvad.Vad(self.cfg.vad_aggressiveness)
+
+        self.state = _State.IDLE
+        self.utterance_buf = bytearray()
+        self.preroll_buf = bytearray()
+        self.preroll_max = int(self.cfg.preroll_ms * SAMPLES_PER_MS * BYTES_PER_SAMPLE)
+        self.silence_samples = 0
+        self.silence_threshold = int(self.cfg.speech_stop_silence_ms * SAMPLES_PER_MS)
+        self.min_bytes = int(self.cfg.min_utterance_ms * SAMPLES_PER_MS * BYTES_PER_SAMPLE)
+        self.max_bytes = int(self.cfg.max_utterance_ms * SAMPLES_PER_MS * BYTES_PER_SAMPLE)
+
+        self.ring_buffer = [False] * self.cfg.ring_buffer_size
+        self.ring_idx = 0
+
+        self.speech_start_count = 0
+        self.total_samples = 0
+        self.item_id = ""
+
+    def _ring_vote(self) -> bool:
+        return sum(self.ring_buffer) >= self.cfg.ring_buffer_threshold
+
+    def _push_ring(self, is_speech: bool):
+        self.ring_buffer[self.ring_idx % self.cfg.ring_buffer_size] = is_speech
+        self.ring_idx += 1
+
+    def feed(self, chunk_bytes: bytes) -> list[dict]:
+        events = []
+        chunk_samples = np.frombuffer(chunk_bytes, dtype=np.int16)
+        n = len(chunk_samples)
+        self.total_samples += n
+
+        frame_decisions = _vad_frames(self.vad, chunk_samples)
+        chunk_speech = sum(frame_decisions) > len(frame_decisions) * 0.3 if frame_decisions else False
+
+        self._push_ring(chunk_speech)
+        smoothed_speech = self._ring_vote()
+
+        if self.state == _State.IDLE:
+            self.preroll_buf.extend(chunk_bytes)
+            if len(self.preroll_buf) > self.preroll_max:
+                self.preroll_buf = self.preroll_buf[-self.preroll_max:]
+
+            if smoothed_speech:
+                self.speech_start_count += 1
+            else:
+                self.speech_start_count = 0
+
+            if self.speech_start_count >= self.cfg.speech_start_frames:
+                self.state = _State.SPEAKING
+                self.silence_samples = 0
+                self.speech_start_count = 0
+                self.item_id = _make_iid()
+                self.utterance_buf.clear()
+                self.utterance_buf.extend(self.preroll_buf)
+                self.utterance_buf.extend(chunk_bytes)
+                ms = int(self.total_samples / SAMPLES_PER_MS)
+                events.append({"type": "speech_started", "audio_start_ms": ms, "item_id": self.item_id})
+
+        elif self.state == _State.SPEAKING:
+            self.utterance_buf.extend(chunk_bytes)
+
+            if not smoothed_speech:
+                self.silence_samples += n
+                if self.silence_samples >= self.silence_threshold:
+                    self.state = _State.SILENCE_PENDING
+            else:
+                self.silence_samples = 0
+
+            if len(self.utterance_buf) >= self.max_bytes:
+                events.extend(self._finalize("max_length"))
+
+            if self.state == _State.SILENCE_PENDING:
+                events.extend(self._finalize("silence"))
+
+        elif self.state == _State.SILENCE_PENDING:
+            pass
+
+        return events
+
+    def _finalize(self, reason: str) -> list[dict]:
+        events = []
+        ms = int(self.total_samples / SAMPLES_PER_MS)
+        pcm = bytes(self.utterance_buf)
+        self.utterance_buf.clear()
+        self.preroll_buf.clear()
+        self.state = _State.IDLE
+        self.silence_samples = 0
+        self.speech_start_count = 0
+        self.ring_buffer = [False] * self.cfg.ring_buffer_size
+
+        events.append({"type": "speech_stopped", "audio_end_ms": ms, "item_id": self.item_id})
+
+        if len(pcm) >= self.min_bytes:
+            events.append({"type": "utterance_ready", "pcm": pcm, "item_id": self.item_id, "reason": reason})
+        else:
+            log.info(f"Utterance too short: {len(pcm) / (SAMPLES_PER_MS * BYTES_PER_SAMPLE):.0f}ms, discarded")
+
+        return events
+
+    def flush(self) -> list[dict]:
+        if self.state in (_State.SPEAKING, _State.SILENCE_PENDING) and self.utterance_buf:
+            return self._finalize("flush")
+        pcm = bytes(self.preroll_buf) if self.preroll_buf else b""
+        self.preroll_buf.clear()
+        self.state = _State.IDLE
+        if len(pcm) >= self.min_bytes:
+            iid = self.item_id or _make_iid()
+            return [{"type": "utterance_ready", "pcm": pcm, "item_id": iid, "reason": "manual_commit"}]
+        return []
+
+
+async def _transcription_worker(ws: WebSocket, queue: asyncio.Queue, denoise: bool):
+    while True:
+        job = await queue.get()
+        if job is None:
+            break
+        pcm_bytes, item_id = job["pcm"], job["item_id"]
+        try:
+            if denoise:
+                pcm_bytes = await asyncio.to_thread(_denoise_pcm, pcm_bytes, SAMPLE_RATE)
+            await _transcribe_and_send(ws, pcm_bytes, item_id)
+        except Exception as e:
+            log.error(f"Transcription error: {e}")
+        finally:
+            queue.task_done()
 
 
 @app.websocket("/v1/realtime")
@@ -255,27 +440,24 @@ async def realtime_ws(ws: WebSocket, intent: str = "transcription"):
     await ws.accept(subprotocol=subproto)
 
     sid = f"sess_{uuid.uuid4().hex[:20]}"
-    SILENCE_MS, PREFIX_MS, MIN_SPEECH_MS, MAX_SPEECH_MS = 1200, 300, 500, 8000
-
-    silence_thresh = int(SILENCE_MS * SAMPLES_PER_MS)
-    prefix_bytes = int(PREFIX_MS * SAMPLES_PER_MS * BYTES_PER_SAMPLE)
-    min_bytes = int(MIN_SPEECH_MS * SAMPLES_PER_MS * BYTES_PER_SAMPLE)
-    max_bytes = int(MAX_SPEECH_MS * SAMPLES_PER_MS * BYTES_PER_SAMPLE)
-
-    vad = webrtcvad.Vad(2)
-    buf = bytearray()
-    pre_buf = bytearray()
-    active = False
-    silence = 0
-    confirm = 0
-    total = 0
-    iid = ""
+    cfg = AudioPipelineConfig()
+    pipeline = AudioPipeline(cfg)
+    tx_queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+    worker_task = asyncio.create_task(_transcription_worker(ws, tx_queue, cfg.denoise))
 
     await ws.send_json({
         "event_id": _make_eid(), "type": "session.created",
         "session": {
             "id": sid, "object": "realtime.transcription_session", "type": "transcription",
-            "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}, "transcription": {"model": "lfm2.5-audio-1.5b"}, "turn_detection": {"type": "server_vad"}}},
+            "audio": {"input": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "transcription": {"model": "lfm2.5-audio-1.5b"},
+                "turn_detection": {
+                    "type": "server_vad",
+                    "silence_duration_ms": cfg.speech_stop_silence_ms,
+                    "prefix_padding_ms": cfg.preroll_ms,
+                },
+            }},
         },
     })
 
@@ -294,73 +476,54 @@ async def realtime_ws(ws: WebSocket, intent: str = "transcription"):
                 if not b64:
                     continue
                 chunk = base64.b64decode(b64)
-                samples = np.frombuffer(chunk, dtype=np.int16)
-                n = len(samples)
-                total += n
-                is_speech = _check_speech(vad, samples)
+                events = pipeline.feed(chunk)
 
-                if not active:
-                    pre_buf.extend(chunk)
-                    if len(pre_buf) > prefix_bytes:
-                        pre_buf = pre_buf[-prefix_bytes:]
-                    if is_speech:
-                        confirm += 1
-                    else:
-                        confirm = 0
-                    if confirm >= 2:
-                        active = True
-                        silence = 0
-                        confirm = 0
-                        iid = _make_iid()
-                        buf.clear()
-                        buf.extend(pre_buf)
-                        buf.extend(chunk)
-                        ms = int(total / SAMPLES_PER_MS)
-                        log.info(f"speech_started at {ms}ms")
+                for evt in events:
+                    if evt["type"] == "speech_started":
+                        log.info(f"speech_started at {evt['audio_start_ms']}ms")
                         if ws.client_state == WebSocketState.CONNECTED:
-                            await ws.send_json({"event_id": _make_eid(), "type": "input_audio_buffer.speech_started", "audio_start_ms": ms, "item_id": iid})
-                else:
-                    buf.extend(chunk)
-                    silence = silence + n if not is_speech else 0
-                    if silence >= silence_thresh or len(buf) >= max_bytes:
-                        ms = int(total / SAMPLES_PER_MS)
-                        active = False
-                        silence = 0
-                        log.info(f"speech_stopped at {ms}ms")
+                            await ws.send_json({"event_id": _make_eid(), "type": "input_audio_buffer.speech_started", "audio_start_ms": evt["audio_start_ms"], "item_id": evt["item_id"]})
+
+                    elif evt["type"] == "speech_stopped":
+                        log.info(f"speech_stopped at {evt['audio_end_ms']}ms")
                         if ws.client_state == WebSocketState.CONNECTED:
-                            await ws.send_json({"event_id": _make_eid(), "type": "input_audio_buffer.speech_stopped", "audio_end_ms": ms, "item_id": iid})
-                            await ws.send_json({"event_id": _make_eid(), "type": "input_audio_buffer.committed", "item_id": iid, "previous_item_id": None})
-                        pcm = bytes(buf)
-                        buf.clear()
-                        pre_buf.clear()
-                        if len(pcm) >= min_bytes:
-                            asyncio.create_task(_transcribe_and_send(ws, pcm, iid))
+                            await ws.send_json({"event_id": _make_eid(), "type": "input_audio_buffer.speech_stopped", "audio_end_ms": evt["audio_end_ms"], "item_id": evt["item_id"]})
+
+                    elif evt["type"] == "utterance_ready":
+                        dur = len(evt["pcm"]) / (SAMPLES_PER_MS * BYTES_PER_SAMPLE)
+                        log.info(f"utterance_ready: {dur:.0f}ms ({evt['reason']})")
+                        if ws.client_state == WebSocketState.CONNECTED:
+                            await ws.send_json({"event_id": _make_eid(), "type": "input_audio_buffer.committed", "item_id": evt["item_id"], "previous_item_id": None})
+                        await tx_queue.put({"pcm": evt["pcm"], "item_id": evt["item_id"]})
 
             elif mt == "input_audio_buffer.clear":
-                buf.clear()
-                pre_buf.clear()
-                active = False
-                silence = 0
-                confirm = 0
+                pipeline = AudioPipeline(cfg)
                 await ws.send_json({"event_id": _make_eid(), "type": "input_audio_buffer.cleared"})
 
             elif mt == "input_audio_buffer.commit":
-                pcm = bytes(buf) if buf else bytes(pre_buf)
+                events = pipeline.flush()
                 cid = _make_iid()
-                buf.clear()
-                pre_buf.clear()
-                active = False
-                silence = 0
-                confirm = 0
-                dur = len(pcm) / (SAMPLES_PER_MS * BYTES_PER_SAMPLE)
                 await ws.send_json({"event_id": _make_eid(), "type": "input_audio_buffer.committed", "item_id": cid, "previous_item_id": None})
-                if dur < 300:
-                    await ws.send_json({"event_id": _make_eid(), "type": "conversation.item.input_audio_transcription.completed", "item_id": cid, "content_index": 0, "transcript": ""})
+                if events:
+                    for evt in events:
+                        if evt["type"] == "utterance_ready":
+                            dur = len(evt["pcm"]) / (SAMPLES_PER_MS * BYTES_PER_SAMPLE)
+                            log.info(f"Manual commit: {dur:.0f}ms")
+                            await tx_queue.put({"pcm": evt["pcm"], "item_id": evt.get("item_id", cid)})
                 else:
-                    log.info(f"Manual commit: {dur:.0f}ms")
-                    asyncio.create_task(_transcribe_and_send(ws, pcm, cid))
+                    await ws.send_json({"event_id": _make_eid(), "type": "conversation.item.input_audio_transcription.completed", "item_id": cid, "content_index": 0, "transcript": ""})
 
             elif mt in ("session.update", "transcription_session.update"):
+                sd = msg.get("session", {})
+                td = sd.get("turn_detection", {})
+                if "silence_duration_ms" in td:
+                    cfg.speech_stop_silence_ms = td["silence_duration_ms"]
+                if "prefix_padding_ms" in td:
+                    cfg.preroll_ms = td["prefix_padding_ms"]
+                if "threshold" in td:
+                    agg = int(max(0, min(3, td["threshold"] * 3)))
+                    cfg.vad_aggressiveness = agg
+                pipeline = AudioPipeline(cfg)
                 rt = "transcription_session.updated" if "transcription" in mt else "session.updated"
                 await ws.send_json({"event_id": _make_eid(), "type": rt, "session": {"id": sid, "type": "transcription"}})
 
@@ -373,6 +536,9 @@ async def realtime_ws(ws: WebSocket, intent: str = "transcription"):
         log.error(f"WS error: {e}")
         if ws.client_state == WebSocketState.CONNECTED:
             await ws.close(code=1011, reason=str(e))
+    finally:
+        await tx_queue.put(None)
+        await worker_task
 
 
 @app.get("/v1/models")
