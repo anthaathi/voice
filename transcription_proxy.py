@@ -284,7 +284,7 @@ class AudioPipelineConfig:
     ring_buffer_size: int = 8
     ring_buffer_threshold: int = 5
     vad_aggressiveness: int = 2
-    denoise: bool = True
+    denoise: bool = False
 
     def __init__(self, **kw):
         for k, v in kw.items():
