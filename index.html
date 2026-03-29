@@ -320,11 +320,19 @@ window.app = function() {
       s._actx = new AudioContext({ sampleRate: 24000 });
       if (intent === 'conversation') s._playCtx = new AudioContext({ sampleRate: 24000 });
 
-      // 2. Get mic
+      // 2. Get mic (requires HTTPS or localhost)
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        s.status = 'Mic requires HTTPS or localhost';
+        s.statusCls = 'st-err'; s.active = false;
+        this._log(which, 'err', 'navigator.mediaDevices unavailable — page must be served over HTTPS or localhost');
+        s._actx.close(); s._actx = null;
+        return;
+      }
       try {
         s._stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (e) {
         s.status = e.message; s.statusCls = 'st-err'; s.active = false;
+        s._actx.close(); s._actx = null;
         return;
       }
 
