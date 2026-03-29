@@ -365,15 +365,14 @@ def _vad_frames(vad: webrtcvad.Vad, chunk_24k: np.ndarray) -> list[bool]:
 
 
 class AudioPipelineConfig:
-    frame_ms: int = 30
     speech_start_frames: int = 3
     speech_stop_silence_ms: int = 800
-    min_utterance_ms: int = 300
-    max_utterance_ms: int = 12000
-    preroll_ms: int = 200
+    min_utterance_ms: int = 800
+    max_utterance_ms: int = 15000
+    preroll_ms: int = 500
     ring_buffer_size: int = 8
     ring_buffer_threshold: int = 5
-    vad_aggressiveness: int = 2
+    vad_aggressiveness: int = 3
 
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -384,7 +383,6 @@ class AudioPipelineConfig:
 class _State:
     IDLE = "idle"
     SPEAKING = "speaking"
-    SILENCE_PENDING = "silence_pending"
 
 
 class AudioPipeline:
@@ -395,13 +393,13 @@ class AudioPipeline:
         self.utterance_buf = bytearray()
         self.preroll_buf = bytearray()
         self.preroll_max = int(self.cfg.preroll_ms * SAMPLES_PER_MS * BYTES_PER_SAMPLE)
-        self.silence_samples = 0
-        self.silence_threshold = int(self.cfg.speech_stop_silence_ms * SAMPLES_PER_MS)
         self.min_bytes = int(self.cfg.min_utterance_ms * SAMPLES_PER_MS * BYTES_PER_SAMPLE)
         self.max_bytes = int(self.cfg.max_utterance_ms * SAMPLES_PER_MS * BYTES_PER_SAMPLE)
         self.ring_buffer = [False] * self.cfg.ring_buffer_size
         self.ring_idx = 0
         self.speech_start_count = 0
+        self.silence_frames = 0
+        self.silence_frames_threshold = int(self.cfg.speech_stop_silence_ms / VAD_FRAME_MS)
         self.total_samples = 0
         self.item_id = ""
 
@@ -415,45 +413,46 @@ class AudioPipeline:
     def feed(self, chunk_bytes: bytes) -> list[dict]:
         events = []
         chunk_samples = np.frombuffer(chunk_bytes, dtype=np.int16)
-        n = len(chunk_samples)
-        self.total_samples += n
+        self.total_samples += len(chunk_samples)
 
         frame_decisions = _vad_frames(self.vad, chunk_samples)
-        chunk_speech = sum(frame_decisions) > len(frame_decisions) * 0.3 if frame_decisions else False
-        self._push_ring(chunk_speech)
-        smoothed_speech = self._ring_vote()
+
+        for is_speech in frame_decisions:
+            self._push_ring(is_speech)
+            smoothed = self._ring_vote()
+
+            if self.state == _State.IDLE:
+                if smoothed:
+                    self.speech_start_count += 1
+                else:
+                    self.speech_start_count = 0
+
+                if self.speech_start_count >= self.cfg.speech_start_frames:
+                    self.state = _State.SPEAKING
+                    self.silence_frames = 0
+                    self.speech_start_count = 0
+                    self.item_id = _make_iid()
+                    self.utterance_buf.clear()
+                    self.utterance_buf.extend(self.preroll_buf)
+                    ms = int(self.total_samples / SAMPLES_PER_MS)
+                    events.append({"type": "speech_started", "audio_start_ms": ms, "item_id": self.item_id})
+
+            elif self.state == _State.SPEAKING:
+                if not smoothed:
+                    self.silence_frames += 1
+                    if self.silence_frames >= self.silence_frames_threshold:
+                        events.extend(self._finalize("silence"))
+                else:
+                    self.silence_frames = 0
 
         if self.state == _State.IDLE:
             self.preroll_buf.extend(chunk_bytes)
             if len(self.preroll_buf) > self.preroll_max:
                 self.preroll_buf = self.preroll_buf[-self.preroll_max:]
-            if smoothed_speech:
-                self.speech_start_count += 1
-            else:
-                self.speech_start_count = 0
-            if self.speech_start_count >= self.cfg.speech_start_frames:
-                self.state = _State.SPEAKING
-                self.silence_samples = 0
-                self.speech_start_count = 0
-                self.item_id = _make_iid()
-                self.utterance_buf.clear()
-                self.utterance_buf.extend(self.preroll_buf)
-                self.utterance_buf.extend(chunk_bytes)
-                ms = int(self.total_samples / SAMPLES_PER_MS)
-                events.append({"type": "speech_started", "audio_start_ms": ms, "item_id": self.item_id})
-
         elif self.state == _State.SPEAKING:
             self.utterance_buf.extend(chunk_bytes)
-            if not smoothed_speech:
-                self.silence_samples += n
-                if self.silence_samples >= self.silence_threshold:
-                    self.state = _State.SILENCE_PENDING
-            else:
-                self.silence_samples = 0
             if len(self.utterance_buf) >= self.max_bytes:
                 events.extend(self._finalize("max_length"))
-            if self.state == _State.SILENCE_PENDING:
-                events.extend(self._finalize("silence"))
 
         return events
 
@@ -464,7 +463,7 @@ class AudioPipeline:
         self.utterance_buf.clear()
         self.preroll_buf.clear()
         self.state = _State.IDLE
-        self.silence_samples = 0
+        self.silence_frames = 0
         self.speech_start_count = 0
         self.ring_buffer = [False] * self.cfg.ring_buffer_size
 
@@ -472,11 +471,12 @@ class AudioPipeline:
         if len(pcm) >= self.min_bytes:
             events.append({"type": "utterance_ready", "pcm": pcm, "item_id": self.item_id, "reason": reason})
         else:
-            log.info(f"Utterance too short ({len(pcm) / (SAMPLES_PER_MS * BYTES_PER_SAMPLE):.0f}ms), discarded")
+            dur_ms = len(pcm) / (SAMPLES_PER_MS * BYTES_PER_SAMPLE)
+            log.info(f"Utterance too short ({dur_ms:.0f}ms < {self.cfg.min_utterance_ms}ms), discarded")
         return events
 
     def flush(self) -> list[dict]:
-        if self.state in (_State.SPEAKING, _State.SILENCE_PENDING) and self.utterance_buf:
+        if self.state == _State.SPEAKING and self.utterance_buf:
             return self._finalize("flush")
         pcm = bytes(self.preroll_buf) if self.preroll_buf else b""
         self.preroll_buf.clear()
