@@ -19,7 +19,7 @@ import uvicorn
 import webrtcvad
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from liquid_audio import LFM2AudioModel, LFM2AudioProcessor, ChatState
 from starlette.websockets import WebSocketState
 
@@ -389,8 +389,6 @@ async def health():
 async def ui():
     return TEST_UI_HTML
 
-
-from fastapi.responses import HTMLResponse
 
 TEST_UI_HTML = """<!DOCTYPE html>
 <html lang="en">
