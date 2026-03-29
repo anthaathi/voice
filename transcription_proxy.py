@@ -233,7 +233,13 @@ async def transcriptions(
 async def _transcribe_and_send(ws: WebSocket, pcm_bytes: bytes, item_id: str):
     wav_tensor, sr = _pcm16_24k_to_tensor(pcm_bytes)
     duration = len(pcm_bytes) / (SAMPLE_RATE * BYTES_PER_SAMPLE)
-    log.info(f"Transcribing: {duration:.2f}s")
+    log.info(f"Transcribing: {duration:.2f}s, samples={wav_tensor.shape}, range=[{wav_tensor.min():.4f},{wav_tensor.max():.4f}]")
+
+    debug_dir = "/tmp/debug_audio"
+    os.makedirs(debug_dir, exist_ok=True)
+    debug_path = f"{debug_dir}/{item_id}.wav"
+    torchaudio.save(debug_path, wav_tensor, sr)
+    log.info(f"Debug audio saved: {debug_path}")
 
     def _generate():
         return list(_run_asr_streaming(wav_tensor, sr))
