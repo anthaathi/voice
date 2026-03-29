@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voice-transcription
+  namespace: default
+  labels:
+    app: voice-transcription
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: voice-transcription
+  template:
+    metadata:
+      labels:
+        app: voice-transcription
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: voice
+          image: ghcr.io/anthaathi/voice-transcription-proxy:latest
+          ports:
+            - containerPort: 8091
+              name: http
+          env:
+            - name: HF_HOME
+              value: /cache/huggingface
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: 8Gi
+            requests:
+              memory: 4Gi
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8091
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8091
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: voice-model-cache
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: voice-model-cache
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: voice-transcription
+  namespace: default
+spec:
+  selector:
+    app: voice-transcription
+  ports:
+    - name: http
+      port: 8091
+      targetPort: 8091
