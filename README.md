@@ -1,6 +1,8 @@
 # Voice Transcription Proxy
 
-OpenAI-compatible transcription proxy for [LFM2.5-Audio-1.5B](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B-GGUF) (Liquid AI).
+Single-container OpenAI-compatible transcription service powered by [LFM2.5-Audio-1.5B](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B-GGUF) (Liquid AI).
+
+Bundles the LFM server + model files + transcription proxy in one image.
 
 ## Endpoints
 
@@ -11,18 +13,46 @@ OpenAI-compatible transcription proxy for [LFM2.5-Audio-1.5B](https://huggingfac
 | `ws:///v1/realtime?intent=transcription` | WebSocket | OpenAI Realtime API compatible with server VAD (webrtcvad) |
 | `GET /health` | HTTP | Health check |
 
-## Run locally
+## Run locally (no Docker)
 
 ```bash
-uv run transcription-proxy/transcription_proxy.py \
-  --host 0.0.0.0 --port 8091 --lfm-url http://127.0.0.1:8090
+# Start LFM server separately, then:
+uv run python transcription_proxy.py --host 0.0.0.0 --port 8091 --lfm-url http://127.0.0.1:8090
 ```
 
 ## Docker
 
 ```bash
-docker build -t voice-transcription-proxy transcription-proxy/
-docker run -p 8091:8091 voice-transcription-proxy
+# Build (downloads ~1.5GB model during build)
+docker build -t voice .
+
+# Build with Q4_0 quantization (~850MB, faster)
+docker build --build-arg QUANT=Q4_0 -t voice .
+
+# Run
+docker run -p 8091:8091 voice
+```
+
+## Kubernetes
+
+```bash
+kubectl apply -f k8s/
+```
+
+## Architecture
+
+```
+┌──────────────────────────────────────┐
+│  Container                           │
+│                                      │
+│  entrypoint.sh                       │
+│    ├─ llama-liquid-audio-server :8090│
+│    │   (LFM2.5 model, CPU inference)│
+│    │                                 │
+│    └─ transcription_proxy.py  :8091  │
+│        (FastAPI, WebSocket, VAD)     │
+│        └─ proxies to LFM :8090      │
+└──────────────────────────────────────┘
 ```
 
 ## WebSocket protocol (OpenAI Realtime compatible)
