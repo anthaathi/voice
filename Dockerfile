@@ -11,9 +11,11 @@ RUN apt-get update && \
 
 WORKDIR /app
 
+# Layer 1: deps (cached unless pyproject.toml or uv.lock changes)
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+# Layer 2: app code (changes often, but tiny)
 COPY transcription_proxy.py .
 
 ENV NVIDIA_VISIBLE_DEVICES=all
