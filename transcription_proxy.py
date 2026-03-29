@@ -54,6 +54,9 @@ async def load_model():
     log.info(f"Model loaded on {device}")
 
 
+STOP_TOKENS = {"<|im_end|>", "<|endoftext|>", "<|end|>", "</s>"}
+
+
 def _run_asr(wav_tensor: torch.Tensor, sample_rate: int) -> list[str]:
     chat = ChatState(processor)
     chat.new_turn("system")
@@ -68,6 +71,8 @@ def _run_asr(wav_tensor: torch.Tensor, sample_rate: int) -> list[str]:
     for t in model.generate_sequential(**chat, max_new_tokens=2048):
         if t.numel() == 1:
             text = processor.text.decode(t)
+            if text in STOP_TOKENS:
+                break
             tokens.append(text)
     return tokens
 
@@ -124,6 +129,9 @@ async def transcriptions(
         tokens = await asyncio.to_thread(_run_asr, wav_tensor, sr)
 
     text = "".join(tokens).strip()
+    for st in STOP_TOKENS:
+        text = text.replace(st, "")
+    text = text.strip()
     log.info(f"Transcription: '{text}'")
 
     if stream:
@@ -155,7 +163,10 @@ def _run_asr_streaming(wav_tensor: torch.Tensor, sample_rate: int):
 
     for t in model.generate_sequential(**chat, max_new_tokens=2048):
         if t.numel() == 1:
-            yield processor.text.decode(t)
+            text = processor.text.decode(t)
+            if text in STOP_TOKENS:
+                break
+            yield text
 
 
 async def _transcribe_and_send(ws: WebSocket, pcm_bytes: bytes, item_id: str):
@@ -184,6 +195,9 @@ async def _transcribe_and_send(ws: WebSocket, pcm_bytes: bytes, item_id: str):
             })
 
     transcript = "".join(text_parts).strip()
+    for st in STOP_TOKENS:
+        transcript = transcript.replace(st, "")
+    transcript = transcript.strip()
     log.info(f"Transcription: '{transcript}'")
 
     if ws.client_state == WebSocketState.CONNECTED:
