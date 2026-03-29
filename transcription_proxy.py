@@ -230,16 +230,23 @@ async def transcriptions(
 # WebSocket: transcription worker
 # ---------------------------------------------------------------------------
 
+MIN_PEAK_AMPLITUDE = 0.05
+
 async def _transcribe_and_send(ws: WebSocket, pcm_bytes: bytes, item_id: str):
     wav_tensor, sr = _pcm16_24k_to_tensor(pcm_bytes)
     duration = len(pcm_bytes) / (SAMPLE_RATE * BYTES_PER_SAMPLE)
-    log.info(f"Transcribing: {duration:.2f}s, samples={wav_tensor.shape}, range=[{wav_tensor.min():.4f},{wav_tensor.max():.4f}]")
+    peak = float(wav_tensor.abs().max())
+    log.info(f"Transcribing: {duration:.2f}s, peak={peak:.4f}")
 
-    debug_dir = "/tmp/debug_audio"
-    os.makedirs(debug_dir, exist_ok=True)
-    debug_path = f"{debug_dir}/{item_id}.wav"
-    torchaudio.save(debug_path, wav_tensor, sr)
-    log.info(f"Debug audio saved: {debug_path}")
+    if peak < MIN_PEAK_AMPLITUDE:
+        log.info(f"Rejected: peak {peak:.4f} < {MIN_PEAK_AMPLITUDE} (silence/noise)")
+        if ws.client_state == WebSocketState.CONNECTED:
+            await ws.send_json({
+                "event_id": _make_eid(),
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": item_id, "content_index": 0, "transcript": "",
+            })
+        return
 
     def _generate():
         return list(_run_asr_streaming(wav_tensor, sr))
@@ -285,6 +292,10 @@ async def _transcription_worker(ws: WebSocket, queue: asyncio.Queue):
 
 async def _generate_response_and_send(ws: WebSocket, pcm_bytes: bytes, item_id: str, system_prompt: str):
     wav_tensor, sr = _pcm16_24k_to_tensor(pcm_bytes)
+    peak = float(wav_tensor.abs().max())
+    if peak < MIN_PEAK_AMPLITUDE:
+        log.info(f"Conversation: rejected silence (peak={peak:.4f})")
+        return
     duration = len(pcm_bytes) / (SAMPLE_RATE * BYTES_PER_SAMPLE)
     log.info(f"Generating response for {duration:.2f}s audio")
 
