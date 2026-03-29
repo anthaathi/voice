@@ -1,16 +1,3 @@
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "fastapi",
-#     "uvicorn",
-#     "httpx",
-#     "python-multipart",
-#     "soundfile",
-#     "websockets",
-#     "numpy",
-#     "webrtcvad-wheels",
-# ]
-# ///
 """Whisper-compatible /v1/audio/transcriptions proxy for LFM2.5-Audio server."""
 
 import argparse

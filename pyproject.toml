@@ -1,0 +1,15 @@
+[project]
+name = "transcription-proxy"
+version = "0.1.0"
+description = "OpenAI-compatible transcription proxy for LFM2.5-Audio"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.135.2",
+    "httpx>=0.28.1",
+    "numpy>=2.4.3",
+    "python-multipart>=0.0.22",
+    "soundfile>=0.13.1",
+    "uvicorn>=0.42.0",
+    "webrtcvad-wheels>=2.0.14",
+    "websockets>=16.0",
+]
