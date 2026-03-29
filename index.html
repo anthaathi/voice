@@ -106,14 +106,15 @@ input[type=file]{margin-top:0.25rem;font-size:0.85rem;color:#ccc}
 
 </div>
 
-<script type="module">
-import OpenAI from 'https://esm.sh/openai@latest';
-
-const openai = new OpenAI({
-  baseURL: location.origin + '/v1',
-  apiKey: 'unused',
-  dangerouslyAllowBrowser: true,
-});
+<script>
+let _openai = null;
+async function getOpenAI() {
+  if (!_openai) {
+    const { default: OpenAI } = await import('https://esm.sh/openai@latest');
+    _openai = new OpenAI({ baseURL: location.origin + '/v1', apiKey: 'unused', dangerouslyAllowBrowser: true });
+  }
+  return _openai;
+}
 
 function ts() { return new Date().toLocaleTimeString(); }
 
@@ -157,8 +158,9 @@ window.app = function() {
       this.restStatusCls = 'st-warn';
       this.restResult = '';
       try {
+        const client = await getOpenAI();
         const t0 = performance.now();
-        const r = await openai.audio.transcriptions.create({
+        const r = await client.audio.transcriptions.create({
           file: this.restFile,
           model: 'lfm2.5-audio-1.5b',
         });
