@@ -385,6 +385,284 @@ async def health():
     return {"status": "ok", "model_loaded": model is not None, "device": "cuda" if torch.cuda.is_available() else "cpu"}
 
 
+@app.get("/", response_class=HTMLResponse)
+async def ui():
+    return TEST_UI_HTML
+
+
+from fastapi.responses import HTMLResponse
+
+TEST_UI_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LFM2.5 Transcription Test</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:2rem}
+h1{font-size:1.5rem;margin-bottom:0.5rem;color:#fff}
+.subtitle{color:#888;font-size:0.85rem;margin-bottom:2rem}
+.tabs{display:flex;gap:0.5rem;margin-bottom:1.5rem}
+.tab{padding:0.5rem 1.25rem;border:1px solid #333;border-radius:6px;background:transparent;color:#aaa;cursor:pointer;font-size:0.9rem;transition:all .15s}
+.tab.active{background:#1a1a2e;color:#7c8cf8;border-color:#7c8cf8}
+.panel{display:none;width:100%;max-width:600px}
+.panel.active{display:block}
+.card{background:#111;border:1px solid #222;border-radius:10px;padding:1.5rem;margin-bottom:1rem}
+.btn{padding:0.6rem 1.5rem;border:none;border-radius:6px;font-size:0.9rem;cursor:pointer;transition:all .15s;font-weight:500}
+.btn-primary{background:#7c8cf8;color:#fff}
+.btn-primary:hover{background:#6b7bf7}
+.btn-danger{background:#e04040;color:#fff}
+.btn-danger:hover{background:#c03030}
+.btn:disabled{opacity:0.4;cursor:not-allowed}
+.btn-row{display:flex;gap:0.75rem;margin-top:1rem;align-items:center}
+.status{font-size:0.8rem;color:#888;margin-left:0.5rem}
+.status.active{color:#4ade80}
+.status.error{color:#ef4444}
+.result{background:#0d0d0d;border:1px solid #222;border-radius:8px;padding:1rem;margin-top:1rem;min-height:80px;font-family:'JetBrains Mono',monospace;font-size:0.85rem;white-space:pre-wrap;word-break:break-word;line-height:1.6}
+.result .interim{color:#7c8cf8}
+.result .final{color:#4ade80}
+.log{background:#0d0d0d;border:1px solid #222;border-radius:8px;padding:0.75rem;margin-top:0.75rem;max-height:200px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:0.75rem;color:#666;line-height:1.5}
+.log .evt{color:#888}.log .speech{color:#f0c040}.log .delta{color:#7c8cf8}.log .done{color:#4ade80}.log .err{color:#ef4444}
+label{font-size:0.85rem;color:#aaa;display:block;margin-bottom:0.3rem}
+input[type=file]{margin-top:0.25rem;font-size:0.85rem;color:#ccc}
+.meter{height:4px;background:#222;border-radius:2px;margin-top:0.75rem;overflow:hidden}
+.meter-bar{height:100%;background:#7c8cf8;border-radius:2px;transition:width 0.1s;width:0%}
+</style>
+</head>
+<body>
+<h1>LFM2.5-Audio Transcription</h1>
+<p class="subtitle">OpenAI-compatible STT powered by Liquid AI</p>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('rest')">REST API</button>
+  <button class="tab" onclick="switchTab('ws')">WebSocket Realtime</button>
+</div>
+
+<div id="rest-panel" class="panel active">
+  <div class="card">
+    <label>Upload audio file (wav, mp3, webm, etc.)</label>
+    <input type="file" id="audioFile" accept="audio/*">
+    <div class="btn-row">
+      <button class="btn btn-primary" id="restBtn" onclick="transcribeRest()">Transcribe</button>
+      <label><input type="checkbox" id="restStream"> Stream</label>
+      <span class="status" id="restStatus"></span>
+    </div>
+    <div class="result" id="restResult">Upload a file and click Transcribe...</div>
+  </div>
+</div>
+
+<div id="ws-panel" class="panel">
+  <div class="card">
+    <div class="btn-row">
+      <button class="btn btn-primary" id="wsStartBtn" onclick="wsStart()">Start Recording</button>
+      <button class="btn btn-danger" id="wsStopBtn" onclick="wsStop()" disabled>Stop</button>
+      <span class="status" id="wsStatus"></span>
+    </div>
+    <div class="meter"><div class="meter-bar" id="wsMeter"></div></div>
+    <div class="result" id="wsResult">Click Start Recording to begin...</div>
+    <div class="log" id="wsLog"></div>
+  </div>
+</div>
+
+<script>
+function switchTab(t) {
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(el => el.classList.remove('active'));
+  document.querySelector(`.tab[onclick*="${t}"]`).classList.add('active');
+  document.getElementById(t + '-panel').classList.add('active');
+}
+
+// --- REST ---
+async function transcribeRest() {
+  const file = document.getElementById('audioFile').files[0];
+  if (!file) { alert('Select a file'); return; }
+  const stream = document.getElementById('restStream').checked;
+  const btn = document.getElementById('restBtn');
+  const status = document.getElementById('restStatus');
+  const result = document.getElementById('restResult');
+  btn.disabled = true; status.textContent = 'Uploading...'; status.className = 'status active';
+  result.textContent = '';
+
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('stream', stream ? 'true' : 'false');
+
+  try {
+    const t0 = performance.now();
+    const resp = await fetch('/v1/audio/transcriptions', { method: 'POST', body: fd });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    if (stream) {
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+          try { const d = JSON.parse(line.slice(6)); result.textContent += d.text; } catch {}
+        }
+      }
+    } else {
+      const data = await resp.json();
+      result.innerHTML = '<span class="final">' + (data.text || '(empty)') + '</span>';
+    }
+    const ms = (performance.now() - t0).toFixed(0);
+    status.textContent = `Done in ${ms}ms`; status.className = 'status active';
+  } catch (e) {
+    status.textContent = e.message; status.className = 'status error';
+  }
+  btn.disabled = false;
+}
+
+// --- WebSocket ---
+let ws = null, audioCtx = null, mediaStream = null, processor = null;
+let wsAccum = '', wsFinalText = '';
+
+function wsLog(cls, msg) {
+  const el = document.getElementById('wsLog');
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+function wsRender() {
+  const el = document.getElementById('wsResult');
+  let html = '';
+  if (wsFinalText) html += '<span class="final">' + wsFinalText + '</span>';
+  if (wsAccum) html += (wsFinalText ? ' ' : '') + '<span class="interim">' + wsAccum + '</span>';
+  el.innerHTML = html || '<span style="color:#666">Listening...</span>';
+}
+
+async function wsStart() {
+  const status = document.getElementById('wsStatus');
+  document.getElementById('wsStartBtn').disabled = true;
+  document.getElementById('wsStopBtn').disabled = false;
+  document.getElementById('wsLog').innerHTML = '';
+  wsAccum = ''; wsFinalText = '';
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/v1/realtime?intent=transcription`, ['realtime']);
+
+  ws.onopen = () => {
+    status.textContent = 'Connected'; status.className = 'status active';
+    wsLog('evt', 'WebSocket connected');
+    ws.send(JSON.stringify({ type: 'transcription_session.update', session: {
+      input_audio_format: 'pcm16',
+      turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 1200 }
+    }}));
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'session.created') wsLog('evt', 'session.created: ' + msg.session?.id);
+      else if (msg.type === 'transcription_session.updated') wsLog('evt', 'session updated');
+      else if (msg.type === 'input_audio_buffer.speech_started') { wsLog('speech', 'speech_started'); status.textContent = 'Speech detected'; }
+      else if (msg.type === 'input_audio_buffer.speech_stopped') { wsLog('speech', 'speech_stopped'); status.textContent = 'Processing...'; }
+      else if (msg.type === 'input_audio_buffer.committed') wsLog('evt', 'committed: ' + msg.item_id);
+      else if (msg.type === 'conversation.item.input_audio_transcription.delta') {
+        wsAccum += msg.delta;
+        wsLog('delta', 'delta: ' + msg.delta);
+        wsRender();
+      } else if (msg.type === 'conversation.item.input_audio_transcription.completed') {
+        if (msg.transcript) {
+          wsFinalText += (wsFinalText ? ' ' : '') + msg.transcript;
+          wsLog('done', 'completed: ' + msg.transcript);
+        }
+        wsAccum = '';
+        wsRender();
+        status.textContent = 'Listening'; status.className = 'status active';
+      } else if (msg.type === 'error') {
+        wsLog('err', 'error: ' + msg.error?.message);
+      }
+    } catch {}
+  };
+
+  ws.onerror = () => { status.textContent = 'Error'; status.className = 'status error'; wsLog('err', 'WebSocket error'); };
+  ws.onclose = () => { status.textContent = 'Disconnected'; status.className = 'status'; wsLog('evt', 'Disconnected'); };
+
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new AudioContext({ sampleRate: 24000 });
+    const source = audioCtx.createMediaStreamSource(mediaStream);
+
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    const dataArr = new Uint8Array(analyser.frequencyBinCount);
+    const meterEl = document.getElementById('wsMeter');
+    function tick() {
+      if (!audioCtx) return;
+      analyser.getByteFrequencyData(dataArr);
+      let sum = 0; for (let i = 0; i < dataArr.length; i++) sum += dataArr[i];
+      meterEl.style.width = Math.min(100, (sum / dataArr.length / 255) * 300) + '%';
+      requestAnimationFrame(tick);
+    }
+    tick();
+
+    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    processor.onaudioprocess = (e) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const f32 = e.inputBuffer.getChannelData(0);
+      const i16 = new Int16Array(f32.length);
+      for (let i = 0; i < f32.length; i++) {
+        const s = Math.max(-1, Math.min(1, f32[i]));
+        i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      const bytes = new Uint8Array(i16.buffer);
+      let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: btoa(bin) }));
+    };
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    status.textContent = 'Listening'; status.className = 'status active';
+  } catch (e) {
+    status.textContent = e.message; status.className = 'status error';
+  }
+}
+
+async function wsStop() {
+  document.getElementById('wsStartBtn').disabled = false;
+  document.getElementById('wsStopBtn').disabled = true;
+  document.getElementById('wsMeter').style.width = '0%';
+
+  if (processor) { processor.disconnect(); processor = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+    await new Promise(r => {
+      const orig = ws.onmessage;
+      const timeout = setTimeout(r, 10000);
+      ws.onmessage = (e) => {
+        if (orig) orig(e);
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'conversation.item.input_audio_transcription.completed') { clearTimeout(timeout); r(); }
+        } catch {}
+      };
+    });
+    ws.close();
+  }
+  ws = null;
+  document.getElementById('wsStatus').textContent = 'Stopped';
+  document.getElementById('wsStatus').className = 'status';
+}
+</script>
+</body>
+</html>"""
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
