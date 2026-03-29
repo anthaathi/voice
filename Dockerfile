@@ -16,7 +16,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Layer 2: app code (changes often, but tiny)
-COPY transcription_proxy.py .
+COPY transcription_proxy.py index.html ./
 
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility

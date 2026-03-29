@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LFM2.5 Audio — OpenAI SDK Demo</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:2rem 1rem}
+h1{font-size:1.5rem;margin-bottom:0.25rem;color:#fff}
+.subtitle{color:#888;font-size:0.85rem;margin-bottom:0.5rem}
+.sdk-badge{display:inline-block;background:#1a1a2e;color:#7c8cf8;font-size:0.7rem;padding:2px 8px;border-radius:4px;border:1px solid #333;margin-bottom:2rem;font-family:monospace}
+.tabs{display:flex;gap:0.5rem;margin-bottom:1.5rem;flex-wrap:wrap;justify-content:center}
+.tab{padding:0.5rem 1.25rem;border:1px solid #333;border-radius:6px;background:transparent;color:#aaa;cursor:pointer;font-size:0.9rem;transition:all .15s}
+.tab.active{background:#1a1a2e;color:#7c8cf8;border-color:#7c8cf8}
+.panel{display:none;width:100%;max-width:640px}
+.panel.active{display:block}
+.card{background:#111;border:1px solid #222;border-radius:10px;padding:1.5rem;margin-bottom:1rem}
+.card h3{font-size:0.95rem;color:#ccc;margin-bottom:0.75rem;display:flex;align-items:center;gap:0.5rem}
+.card h3 code{font-size:0.75rem;background:#1a1a2e;color:#7c8cf8;padding:2px 6px;border-radius:3px}
+.btn{padding:0.6rem 1.5rem;border:none;border-radius:6px;font-size:0.9rem;cursor:pointer;transition:all .15s;font-weight:500}
+.btn-primary{background:#7c8cf8;color:#fff}
+.btn-primary:hover{background:#6b7bf7}
+.btn-danger{background:#e04040;color:#fff}
+.btn-danger:hover{background:#c03030}
+.btn-green{background:#22c55e;color:#fff}
+.btn-green:hover{background:#16a34a}
+.btn:disabled{opacity:0.4;cursor:not-allowed}
+.btn-row{display:flex;gap:0.75rem;margin-top:1rem;align-items:center;flex-wrap:wrap}
+.status{font-size:0.8rem;color:#888;margin-left:auto}
+.status.ok{color:#4ade80}
+.status.warn{color:#f0c040}
+.status.err{color:#ef4444}
+.result{background:#0d0d0d;border:1px solid #222;border-radius:8px;padding:1rem;margin-top:1rem;min-height:60px;font-family:'JetBrains Mono',monospace;font-size:0.85rem;white-space:pre-wrap;word-break:break-word;line-height:1.6}
+.result .user{color:#4ade80}
+.result .ai{color:#c084fc}
+.result .interim{color:#7c8cf8}
+.result .muted{color:#555}
+.log{background:#0d0d0d;border:1px solid #222;border-radius:8px;padding:0.75rem;margin-top:0.75rem;max-height:180px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:#555;line-height:1.4}
+.log div{padding:1px 0}
+.log .info{color:#888}
+.log .speech{color:#f0c040}
+.log .data{color:#7c8cf8}
+.log .ok{color:#4ade80}
+.log .err{color:#ef4444}
+.log .audio{color:#c084fc}
+label{font-size:0.85rem;color:#aaa;display:block;margin-bottom:0.3rem}
+input[type=file]{margin-top:0.25rem;font-size:0.85rem;color:#ccc}
+.meter{height:4px;background:#222;border-radius:2px;margin-top:0.75rem;overflow:hidden}
+.meter-fill{height:100%;background:#7c8cf8;border-radius:2px;transition:width 80ms;width:0%}
+.code-block{background:#0d0d0d;border:1px solid #222;border-radius:6px;padding:0.75rem;margin-top:0.75rem;font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:#888;line-height:1.5;overflow-x:auto;white-space:pre}
+.code-block .kw{color:#c084fc}
+.code-block .str{color:#4ade80}
+.code-block .cm{color:#555}
+</style>
+</head>
+<body>
+<h1>LFM2.5-Audio</h1>
+<p class="subtitle">Speech-to-Text &amp; Speech-to-Speech — Liquid AI</p>
+<span class="sdk-badge">openai@latest SDK compatible</span>
+
+<div class="tabs">
+  <button class="tab active" data-tab="rest">REST Transcription</button>
+  <button class="tab" data-tab="ws">Realtime Transcription</button>
+  <button class="tab" data-tab="conv">Realtime Conversation</button>
+</div>
+
+<!-- REST panel -->
+<div id="rest" class="panel active">
+  <div class="card">
+    <h3>Upload &amp; Transcribe <code>client.audio.transcriptions.create()</code></h3>
+    <label>Audio file (wav, mp3, webm, ogg, etc.)</label>
+    <input type="file" id="restFile" accept="audio/*">
+    <div class="btn-row">
+      <button class="btn btn-primary" id="restBtn">Transcribe</button>
+      <span class="status" id="restStatus"></span>
+    </div>
+    <div class="result" id="restResult"><span class="muted">Upload a file and click Transcribe...</span></div>
+    <div class="code-block"><span class="kw">const</span> client = <span class="kw">new</span> OpenAI({ baseURL: <span class="str">'${baseURL}'</span>, apiKey: <span class="str">'unused'</span> })
+<span class="kw">const</span> { text } = <span class="kw">await</span> client.audio.transcriptions.create({
+  file: audioFile,
+  model: <span class="str">'lfm2.5-audio-1.5b'</span>,
+})</div>
+  </div>
+</div>
+
+<!-- WS Transcription panel -->
+<div id="ws" class="panel">
+  <div class="card">
+    <h3>Live Mic Transcription <code>WebSocket /v1/realtime?intent=transcription</code></h3>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="wsStartBtn">Start</button>
+      <button class="btn btn-danger" id="wsStopBtn" disabled>Stop</button>
+      <span class="status" id="wsStatus"></span>
+    </div>
+    <div class="meter"><div class="meter-fill" id="wsMeter"></div></div>
+    <div class="result" id="wsResult"><span class="muted">Click Start to begin transcription...</span></div>
+    <div class="log" id="wsLog"></div>
+  </div>
+</div>
+
+<!-- Conversation panel -->
+<div id="conv" class="panel">
+  <div class="card">
+    <h3>Voice Conversation <code>WebSocket /v1/realtime?intent=conversation</code></h3>
+    <div class="btn-row">
+      <button class="btn btn-green" id="convStartBtn">Start Conversation</button>
+      <button class="btn btn-danger" id="convStopBtn" disabled>Stop</button>
+      <span class="status" id="convStatus"></span>
+    </div>
+    <div class="meter"><div class="meter-fill" id="convMeter"></div></div>
+    <div class="result" id="convResult"><span class="muted">Click Start to begin a voice conversation...</span></div>
+    <div class="log" id="convLog"></div>
+  </div>
+</div>
+
+<script type="module">
+import OpenAI from 'https://esm.sh/openai@latest';
+
+const BASE = window.location.origin;
+
+const client = new OpenAI({
+  baseURL: BASE + '/v1',
+  apiKey: 'unused',
+  dangerouslyAllowBrowser: true,
+});
+
+// ---- Tabs ----
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.tab).classList.add('active');
+  });
+});
+
+// ---- REST Transcription via OpenAI SDK ----
+document.getElementById('restBtn').addEventListener('click', async () => {
+  const fileInput = document.getElementById('restFile');
+  const file = fileInput.files[0];
+  if (!file) { alert('Select a file first'); return; }
+
+  const btn = document.getElementById('restBtn');
+  const status = document.getElementById('restStatus');
+  const result = document.getElementById('restResult');
+  btn.disabled = true;
+  status.textContent = 'Uploading...';
+  status.className = 'status warn';
+  result.innerHTML = '';
+
+  try {
+    const t0 = performance.now();
+    const transcription = await client.audio.transcriptions.create({
+      file: file,
+      model: 'lfm2.5-audio-1.5b',
+    });
+    const ms = (performance.now() - t0).toFixed(0);
+    result.innerHTML = `<span class="user">${transcription.text || '(empty)'}</span>`;
+    status.textContent = `Done in ${ms}ms`;
+    status.className = 'status ok';
+  } catch (e) {
+    result.innerHTML = `<span class="err">${e.message}</span>`;
+    status.textContent = 'Error';
+    status.className = 'status err';
+  }
+  btn.disabled = false;
+});
+
+// ---- WebSocket helpers ----
+function log(panelId, cls, msg) {
+  const el = document.getElementById(panelId + 'Log');
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+class RealtimeSession {
+  constructor(intent) {
+    this.intent = intent;
+    this.prefix = intent === 'conversation' ? 'conv' : 'ws';
+    this.ws = null;
+    this.audioCtx = null;
+    this.mediaStream = null;
+    this.scriptProcessor = null;
+    this.playCtx = null;
+    this.playQueue = [];
+    this.playing = false;
+    this.userText = '';
+    this.interim = '';
+    this.aiText = '';
+  }
+
+  render() {
+    const el = document.getElementById(this.prefix + 'Result');
+    let html = '';
+    if (this.userText) html += `<span class="user">${this.userText}</span>`;
+    if (this.interim) html += `${this.userText ? ' ' : ''}<span class="interim">${this.interim}</span>`;
+    if (this.aiText) html += `\n<span class="ai">AI: ${this.aiText}</span>`;
+    el.innerHTML = html || '<span class="muted">Listening...</span>';
+  }
+
+  setStatus(text, cls) {
+    const el = document.getElementById(this.prefix + 'Status');
+    el.textContent = text;
+    el.className = 'status ' + (cls || '');
+  }
+
+  playAudioChunk(base64pcm) {
+    if (!this.playCtx) return;
+    const raw = atob(base64pcm);
+    const buf = new ArrayBuffer(raw.length);
+    const u8 = new Uint8Array(buf);
+    for (let i = 0; i < raw.length; i++) u8[i] = raw.charCodeAt(i);
+    const i16 = new Int16Array(buf);
+    const f32 = new Float32Array(i16.length);
+    for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+    const ab = this.playCtx.createBuffer(1, f32.length, 24000);
+    ab.getChannelData(0).set(f32);
+    this.playQueue.push(ab);
+    this._drain();
+  }
+
+  _drain() {
+    if (this.playing || !this.playQueue.length || !this.playCtx) return;
+    this.playing = true;
+    const buf = this.playQueue.shift();
+    const src = this.playCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.playCtx.destination);
+    src.onended = () => { this.playing = false; this._drain(); };
+    src.start();
+  }
+
+  async start() {
+    const p = this.prefix;
+    document.getElementById(p + 'StartBtn').disabled = true;
+    document.getElementById(p + 'StopBtn').disabled = false;
+    document.getElementById(p + 'Log').innerHTML = '';
+    this.userText = ''; this.interim = ''; this.aiText = '';
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    this.ws = new WebSocket(
+      `${proto}//${location.host}/v1/realtime?intent=${this.intent}`,
+      ['realtime']
+    );
+
+    this.ws.onopen = () => {
+      this.setStatus('Connected', 'ok');
+      log(p, 'info', `WebSocket connected (intent=${this.intent})`);
+      this.ws.send(JSON.stringify({
+        type: 'transcription_session.update',
+        session: {
+          input_audio_format: 'pcm16',
+          turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 1000 },
+        },
+      }));
+    };
+
+    if (this.intent === 'conversation') {
+      this.playCtx = new AudioContext({ sampleRate: 24000 });
+    }
+
+    this.ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        const t = msg.type;
+
+        if (t === 'session.created')
+          log(p, 'info', 'session: ' + msg.session?.id);
+        else if (t.includes('.updated'))
+          log(p, 'info', 'session updated');
+        else if (t === 'input_audio_buffer.speech_started') {
+          log(p, 'speech', 'speech started');
+          this.setStatus('Speech detected', 'ok');
+        } else if (t === 'input_audio_buffer.speech_stopped') {
+          log(p, 'speech', 'speech stopped');
+          this.setStatus('Processing...', 'warn');
+        } else if (t === 'input_audio_buffer.committed')
+          log(p, 'info', 'committed: ' + msg.item_id);
+
+        // Transcription events
+        else if (t === 'conversation.item.input_audio_transcription.delta') {
+          this.interim += msg.delta;
+          log(p, 'data', 'delta: ' + msg.delta);
+          this.render();
+        } else if (t === 'conversation.item.input_audio_transcription.completed') {
+          if (msg.transcript) {
+            this.userText += (this.userText ? ' ' : '') + msg.transcript;
+            log(p, 'ok', 'transcript: ' + msg.transcript);
+          }
+          this.interim = '';
+          this.render();
+          this.setStatus('Listening', 'ok');
+        }
+
+        // Conversation response events
+        else if (t === 'response.created') {
+          log(p, 'info', 'response started');
+          this.aiText = '';
+          this.setStatus('AI responding...', 'warn');
+        } else if (t === 'response.audio_transcript.delta') {
+          this.aiText += msg.delta;
+          log(p, 'data', 'ai: ' + msg.delta);
+          this.render();
+        } else if (t === 'response.audio.delta') {
+          this.playAudioChunk(msg.delta);
+          log(p, 'audio', 'audio chunk');
+        } else if (t === 'response.audio_transcript.done')
+          log(p, 'ok', 'ai done: ' + msg.transcript);
+        else if (t === 'response.audio.done')
+          log(p, 'ok', 'audio done');
+        else if (t === 'response.done') {
+          log(p, 'ok', 'response complete');
+          this.setStatus('Listening', 'ok');
+        } else if (t === 'error')
+          log(p, 'err', 'error: ' + (msg.error?.message || JSON.stringify(msg)));
+      } catch (ex) { console.error(ex); }
+    };
+
+    this.ws.onerror = () => { this.setStatus('Error', 'err'); log(p, 'err', 'WebSocket error'); };
+    this.ws.onclose = () => { this.setStatus('Disconnected', ''); log(p, 'info', 'Disconnected'); };
+
+    try {
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.audioCtx = new AudioContext({ sampleRate: 24000 });
+      const source = this.audioCtx.createMediaStreamSource(this.mediaStream);
+
+      const analyser = this.audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      const freqData = new Uint8Array(analyser.frequencyBinCount);
+      const meterEl = document.getElementById(p + 'Meter');
+      const tick = () => {
+        if (!this.audioCtx) return;
+        analyser.getByteFrequencyData(freqData);
+        let sum = 0;
+        for (let i = 0; i < freqData.length; i++) sum += freqData[i];
+        meterEl.style.width = Math.min(100, (sum / freqData.length / 255) * 300) + '%';
+        requestAnimationFrame(tick);
+      };
+      tick();
+
+      this.scriptProcessor = this.audioCtx.createScriptProcessor(4096, 1, 1);
+      this.scriptProcessor.onaudioprocess = (ev) => {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        const f32 = ev.inputBuffer.getChannelData(0);
+        const i16 = new Int16Array(f32.length);
+        for (let i = 0; i < f32.length; i++) {
+          const v = Math.max(-1, Math.min(1, f32[i]));
+          i16[i] = v < 0 ? v * 0x8000 : v * 0x7FFF;
+        }
+        const bytes = new Uint8Array(i16.buffer);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        this.ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: btoa(bin) }));
+      };
+      source.connect(this.scriptProcessor);
+      this.scriptProcessor.connect(this.audioCtx.destination);
+
+      this.setStatus('Listening', 'ok');
+    } catch (err) {
+      this.setStatus(err.message, 'err');
+    }
+  }
+
+  async stop() {
+    const p = this.prefix;
+    document.getElementById(p + 'StartBtn').disabled = false;
+    document.getElementById(p + 'StopBtn').disabled = true;
+    document.getElementById(p + 'Meter').style.width = '0%';
+
+    if (this.scriptProcessor) { this.scriptProcessor.disconnect(); this.scriptProcessor = null; }
+    if (this.audioCtx) { this.audioCtx.close(); this.audioCtx = null; }
+    if (this.mediaStream) { this.mediaStream.getTracks().forEach(t => t.stop()); this.mediaStream = null; }
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+      await new Promise(r => {
+        const orig = this.ws.onmessage;
+        const timeout = setTimeout(r, 8000);
+        this.ws.onmessage = (e) => {
+          if (orig) orig.call(this.ws, e);
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'conversation.item.input_audio_transcription.completed' ||
+                msg.type === 'response.done') { clearTimeout(timeout); r(); }
+          } catch {}
+        };
+      });
+      this.ws.close();
+    }
+    this.ws = null;
+    if (this.playCtx) { this.playCtx.close(); this.playCtx = null; }
+    this.setStatus('Stopped', '');
+  }
+}
+
+// ---- Wire up WS Transcription ----
+const wsSess = new RealtimeSession('transcription');
+document.getElementById('wsStartBtn').addEventListener('click', () => wsSess.start());
+document.getElementById('wsStopBtn').addEventListener('click', () => wsSess.stop());
+
+// ---- Wire up Conversation ----
+const convSess = new RealtimeSession('conversation');
+document.getElementById('convStartBtn').addEventListener('click', () => convSess.start());
+document.getElementById('convStopBtn').addEventListener('click', () => convSess.stop());
+</script>
+</body>
+</html>
